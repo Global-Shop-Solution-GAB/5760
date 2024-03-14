@@ -1,0 +1,290 @@
+Program.Sub.ScreenSU.Start
+Program.Sub.ScreenSU.End
+
+Program.Sub.Preflight.Start
+
+Variable.UDT.uAlpha.Define("ALPHA",String,ALPHA)
+Variable.uGlobal.uAlpha.Declare("uAlpha")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'TJS, November 2019
+'U.S. Bolt identified a problem where if two users enter the new WO screen at the same time, the same User Code is generated for both.
+'Added new USERIDLOCK to GCG_5760_WO_USR_CODE and logic to write the user to this field while in use.  Other users will be met with a wait dialogue
+'until the first user is done.
+'Project changed to GCG_5760_Pop_WO_User_code and upgraded to GAB 2.0
+
+
+'Coded by: SMC
+'Project Start Date: 12/3/2010
+'Hooks:
+'  WO Populate Hook (000016630)
+'  WO Post-Save Hook (000016651)
+'  WO Pre-Exit Hook (000016640)
+'  WO Pre-OK Hook (000016650)
+'Notes:
+'  When creating a new Single-level Work Order, the User Code field will be automatically populated.  This will be an incrementing 4-digit alphanumeric code.  It will start with:
+'  AA01 to AA99, then AB01 to AB99, etc., all the way to ZZ01 to ZZ99.  So the 2-digit number will increment from 01-99 first, then the second alphabetical character will increment
+'  from A-Z, with the first alphabetical number incrementing from A-Z third.  If the code ever reaches ZZ99, it will start over at AA01.
+'
+'  A Custom table to keep track of the incremented number.  There will be three columns: CODE_CHAR_1, CODE_CHAR_2, CODE_NUMERIC.  There will only be a single record written,
+'  which will be the last user code written, split up into the three columns accordingly.
+'
+'  A GAB Script will fire off of Hook 16630 (Populate). If v.caller.switches=N, then the script will read the custom table to get the last user code written.  It will read the numeric column
+'  first, and only increment the numeric if it is less than 99.  If it is 99, it will increment the second character as well and returnt he numeric to 01.  If the second character is Z, it will also
+'  increment the first character too, returning the second character to A.  It will then combine the final characters into the 4-digit code to populate the user code field, and re-write the record in the table.
+
+V.Local.iPos.Declare(Long)
+V.Local.sFile.Declare(String)
+V.Local.bExists.Declare(Boolean)
+V.Local.bContinue.Declare(Boolean)
+V.Local.sUser.Declare
+V.Local.sMSG.Declare
+V.Local.sSQL.Declare
+V.Local.sSwitch.Declare
+V.Local.bRET.Declare
+
+V.Local.sSwitch.Set(V.Caller.Switches)
+
+F.ODBC.Connection!conx.OpenConnection(V.Ambient.PDSN,V.Ambient.PUser,V.Ambient.PPass)
+
+'5760
+F.Intrinsic.String.IsInString(V.Local.sSwitch,"N",True,V.Local.bRET)
+
+F.Intrinsic.Control.If(V.Local.bRET,=,True)
+	F.ODBC.Connection!conx.ExecuteAndReturn("Select RTRIM(USERIDLOCK) as USERIDLOCK from GCG_5760_WO_USR_CODE",V.Local.sUser)
+		F.Intrinsic.Control.If(V.Local.sUser.Trim,=,"")
+			F.Intrinsic.String.Build("update GCG_5760_WO_USR_CODE set USERIDLOCK='{0}'",V.Caller.User.Trim,V.Local.sSQL)
+			F.ODBC.Connection!conx.Execute(V.Local.sSQL)
+			Function.Intrinsic.UI.CloseWaitDialog
+		F.Intrinsic.Control.Else
+			F.Intrinsic.Control.DoUntil(V.Caller.User.Trim,=,V.Local.sUser.Trim)
+				F.ODBC.Connection!conx.ExecuteAndReturn("Select RTRIM(USERIDLOCK) as USERIDLOCK from GCG_5760_WO_USR_CODE",V.Local.sUser)
+				F.Intrinsic.Control.If(V.Local.sUser.Trim,=,"")
+					F.Intrinsic.String.Build("update GCG_5760_WO_USR_CODE set USERIDLOCK='{0}'",V.Caller.User.Trim,V.Local.sSQL)
+					F.ODBC.Connection!conx.Execute(V.Local.sSQL)
+					Function.Intrinsic.UI.CloseWaitDialog
+				F.Intrinsic.Control.ElseIf(V.Caller.User.Trim,<>,V.Local.sUser.Trim)
+					F.Intrinsic.String.Build("Table currently in use by '{0}'",V.Local.sUser,V.Local.sMSG)
+					F.Intrinsic.UI.InvokeWaitDialog(V.Local.sMSG,"Please wait")
+				F.Intrinsic.Control.EndIf
+			F.Intrinsic.Control.Loop
+		F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.EndIf
+
+'F.Intrinsic.UI.Msgbox(V.Caller.Switches)
+F.Intrinsic.Control.If(V.Caller.Hook,=,16630)
+	V.Local.bContinue.Set(False)
+	F.Intrinsic.String.Instr(V.Caller.Switches.ucase,"N",V.Local.iPos)
+'	F.Intrinsic.UI.Msgbox(V.Caller.Switches)
+		F.Intrinsic.Control.If(V.Local.iPos,<>,0)
+		V.Local.bContinue.Set(True)
+		F.Intrinsic.Control.Else
+			F.Intrinsic.Control.If(V.Passed.000003,<>,"")
+				F.Intrinsic.Control.CallSub(Check_wo_exists)
+	'			F.Intrinsic.UI.Msgbox(V.Args.bExists)
+				F.Intrinsic.Control.If(V.Args.bExists,=,False)
+				V.Local.bContinue.Set(True)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+
+	F.Intrinsic.Control.If(V.Local.bContinue,=,True)
+		F.Intrinsic.Control.CallSub(Generate_code,"bUpdate",False)
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Else
+	F.Intrinsic.Control.If(V.Caller.Hook,=,16650,OR,V.Caller.Hook,=,16640)
+		F.Intrinsic.Control.If(V.Passed.000028.Trim,<>,"")
+			F.Intrinsic.Control.CallSub(Unload)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+	F.Intrinsic.String.Concat(V.Caller.TempDir,"\POP_WO_UC_",V.Caller.Terminal,V.Local.sFile)
+	F.Intrinsic.File.Exists(V.Local.sFile,V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists,=,True)
+		F.Intrinsic.File.DeleteFile(V.Local.sFile)
+		F.Intrinsic.Control.If(V.Caller.Hook,=,16651)
+			F.Intrinsic.Control.CallSub(Generate_code,"bUpdate",True)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.EndIf
+
+'f.Intrinsic.String.Instr(V.Caller.Switches.ucase,"N",V.Local.iPos)
+'F.Intrinsic.Control.If(V.Local.iPos,<>,0)
+'	F.Intrinsic.Control.If(V.Caller.Hook,=,16630)
+'		F.ODBC.Connection!conx.OpenConnection(V.Ambient.PDSN,V.Ambient.PUser,V.Ambient.PPass)
+'		F.Intrinsic.Control.CallSub(Generate_code,"bUpdate",False)
+'	F.Intrinsic.Control.ElseIf(V.Caller.Hook,=,16651)
+'		F.ODBC.Connection!conx.OpenConnection(V.Ambient.PDSN,V.Ambient.PUser,V.Ambient.PPass)
+'		F.Intrinsic.Control.CallSub(Generate_code,"bUpdate",True)
+'	F.Intrinsic.Control.ElseIf(V.Caller.Hook,=,16640)
+'		F.Intrinsic.String.Concat(V.Caller.TempDir,"\POP_WO_UC_",V.Caller.Terminal,V.Local.sFile)
+'		F.Intrinsic.File.Exists(V.Local.sFile,V.Local.bExists)
+'		F.Intrinsic.Control.If(V.Local.bExists,=,True)
+'			F.Intrinsic.File.DeleteFile(V.Local.sFile)
+'		F.Intrinsic.Control.EndIf
+'	F.Intrinsic.Control.EndIf
+'F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.CallSub(Unload)
+
+Program.Sub.Main.End
+
+Program.Sub.Unload.Start
+'5760
+V.Local.bRET.Declare
+V.Local.sSwitch.Declare
+
+V.Local.sSwitch.Set(V.Caller.Switches)
+
+F.Intrinsic.Control.SelectCase(V.Caller.Hook)
+	F.Intrinsic.Control.CaseAny(16640,16651)
+		F.Intrinsic.String.IsInString(V.Local.sSwitch,"N",True,V.Local.bRET)
+		F.Intrinsic.Control.If(V.Local.bRET,=,True)
+			F.ODBC.Connection!conx.Execute("update GCG_5760_WO_USR_CODE set USERIDLOCK=''")
+		F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.EndSelect
+
+F.ODBC.Connection!conx.Close
+F.Intrinsic.Control.End
+Program.Sub.Unload.End
+
+Program.Sub.Generate_Code.Start
+V.Local.sError.Declare(String)
+V.Local.sChar1.Declare(String)
+V.Local.iChar1.Declare(Long)
+V.Local.sChar2.Declare(String)
+V.Local.iChar2.Declare(Long)
+V.Local.iNum.Declare(Long)
+V.Local.sNum.Declare(String)
+V.Local.sCode.Declare(String)
+V.Local.sFile.Declare(String)
+V.Local.bExists.Declare(Boolean)
+
+Function.Intrinsic.Control.SetErrorHandler("Generate_Code_Err")
+Function.Intrinsic.Control.ClearErrors
+
+F.Intrinsic.Debug.SetLA("Opening recordset to get last code set")
+F.ODBC.Connection!conx.OpenRecordsetRO("rstCode","SELECT * FROM GCG_5760_WO_USR_CODE")
+F.Intrinsic.Control.If(V.ODBC.conx!rstCode.EOF,<>,True)
+	V.Local.sChar1.Set(V.ODBC.conx!rstCode.FieldValTrim!CODE_CHAR_1)
+	V.Local.sChar2.Set(V.ODBC.conx!rstCode.FieldValTrim!CODE_CHAR_2)
+	V.Local.iNum.Set(V.ODBC.conx!rstCode.FieldValTrim!CODE_NUMERIC)
+F.Intrinsic.Control.Else
+	V.Local.sChar1.Set("Z")
+	V.Local.sChar2.Set("Z")
+	V.Local.iNum.Set(99)
+F.Intrinsic.Control.EndIf
+F.ODBC.conx!rstCode.Close
+
+F.Intrinsic.Debug.SetLA("Incrementing code")
+
+F.Intrinsic.Control.If(V.Local.iNum,=,99)
+	V.Local.iNum.Set(1)
+	
+	F.Intrinsic.Control.CallSub(Increment_char,"sChar",V.Local.sChar2)
+	V.Local.sChar2.Set(V.Args.sChar)
+
+	F.Intrinsic.Control.If(V.Local.sChar2,=,"A")
+		F.Intrinsic.Control.CallSub(Increment_char,"sChar",V.Local.sChar1)
+		V.Local.sChar1.Set(V.Args.sChar)
+	F.Intrinsic.Control.EndIf	
+F.Intrinsic.Control.Else
+	F.Intrinsic.Math.Add(V.Local.iNum,1,V.Local.iNum)
+F.Intrinsic.Control.EndIf
+
+'Nov 29, 2016 'Bao
+'Assume in DB the excluded letters exist in the ATG_POP_WO_USER_CODE (5760: now GCG_5760_WO_USR_CODE) by any reason, in that case, we have to increment it
+F.Intrinsic.String.LPad(V.Local.iNum,"0",2,V.Local.sNum)
+
+F.Intrinsic.String.Concat(V.Caller.TempDir,"\POP_WO_UC_",V.Caller.Terminal,V.Local.sFile)
+
+F.Intrinsic.Control.If(V.Args.bUpdate,=,False)
+	F.Intrinsic.File.String2File(V.Local.sFile,V.Local.sCode)
+	F.Intrinsic.Debug.SetLA("Populating User Code field")
+	F.Intrinsic.String.Concat(V.Local.sChar1,V.Local.sChar2,V.Local.sNum,V.Local.sCode)
+	V.Passed.000028.Set(V.Local.sCode)
+F.Intrinsic.Control.Else
+'	F.Intrinsic.File.Exists(V.Local.sFile,V.Local.bExists)
+'	F.Intrinsic.Control.If(V.Local.bExists,=,True)
+'		F.Intrinsic.File.DeleteFile(V.Local.sFile)
+		F.Intrinsic.Debug.SetLA("Opening recordset to update table")
+
+		F.ODBC.Connection!conx.OpenRecordsetRW("rstCode","SELECT * FROM GCG_5760_WO_USR_CODE")
+		F.Intrinsic.Control.If(V.ODBC.conx!rstCode.EOF,=,True)
+			F.ODBC.conx!rstCode.AddNew
+		F.Intrinsic.Control.EndIf
+		F.ODBC.conx!rstCode.Set!CODE_CHAR_1(V.Local.sChar1)
+		F.ODBC.conx!rstCode.Set!CODE_CHAR_2(V.Local.sChar2)
+		F.ODBC.conx!rstCode.Set!CODE_NUMERIC(V.Local.sNum)
+
+		F.ODBC.conx!rstCode.Update
+		F.ODBC.conx!rstCode.Close
+'	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.CallSub(Unload)
+Function.Intrinsic.Control.Label("Generate_Code_Err")
+Function.Intrinsic.Control.If(Variable.Ambient.ErrorNumber,"<>",0)
+	Function.Intrinsic.String.Concat("Error Occurred ",Variable.Ambient.ErrorNumber," with description ",Variable.Ambient.ErrorDescription,Variable.Local.sError)
+Function.Intrinsic.Control.EndIf
+Program.Sub.Generate_Code.End
+
+Program.Sub.Increment_Char.Start
+V.Local.sChar.Declare(String)
+V.Local.iChar.Declare(Long)
+V.Local.ssql.Declare(String)
+V.Local.i.Declare(Long)
+V.Local.salpha.Declare(String)
+V.Local.balphacheck.Declare(Boolean)
+V.Local.sChar.Set(V.Args.sChar)
+v.Local.iExisted.Declare(long)
+
+'set the boolean local variable as false
+V.Local.balphacheck.Set(False)
+
+'do until the boolean local variable is true
+Function.Intrinsic.Control.DoUntil(V.Local.balphacheck,=,True)
+	F.Intrinsic.Control.If(V.Local.sChar,<>,"Z")
+		F.Intrinsic.String.Asc(V.Local.sChar,V.Local.iChar)
+		F.Intrinsic.Math.Add(V.Local.iChar,1,V.Local.iChar)
+		V.Local.sChar.Set(v.ASCII.[v.local.iChar])
+	F.Intrinsic.Control.Else
+		V.Local.sChar.Set("A")
+	F.Intrinsic.Control.EndIf
+	'select all the ALPHA characters from GCG_ALPHA_MAINT table to check against
+	F.Intrinsic.string.Build("SELECT count(ALPHA) from GCG_3887_ALPHA_MAINT where ALPHA = '{0}'",V.Local.sChar,V.Local.ssql)
+'	F.odbc.Connection!conx.OpenLocalRecordsetRO("rst",V.Local.ssql)
+'	F.Intrinsic.Control.If(V.ODBC.conx!rst.EOF,=,True)
+'		'if end of file = true, set the local boolean variable to true
+'		V.Local.balphacheck.Set(True)
+'	F.Intrinsic.Control.EndIf
+	f.ODBC.Connection!conx.ExecuteAndReturn(v.Local.ssql,v.Local.iExisted)
+	f.Intrinsic.Control.If(v.Local.iExisted,=,0)
+		v.Local.balphacheck.Set(True)
+	f.Intrinsic.Control.EndIf
+
+F.intrinsic.Control.Loop
+
+F.Intrinsic.Variable.AddRV("sChar",V.Local.sChar)
+
+Program.Sub.Increment_Char.End
+
+Program.Sub.Check_WO_Exists.Start
+V.Local.sQuery.Declare(String)
+V.Local.bExists.Declare(String)
+
+F.Intrinsic.String.Concat("SELECT JOB, SUFFIX FROM V_JOB_HEADER WHERE JOB='",V.Passed.000003,"' AND SUFFIX='",V.Passed.000004,"'",V.Local.sQuery)
+F.ODBC.Connection!conx.OpenRecordsetRO("rstOrders",V.Local.sQuery)
+F.Intrinsic.Control.If(V.ODBC.conx!rstOrders.EOF,<>,True)
+	V.local.bExists.set(True)
+F.Intrinsic.Control.else
+	V.local.bExists.set(False)
+F.Intrinsic.control.endif
+F.ODBC.conx!rstOrders.close
+
+F.Intrinsic.Variable.AddRV("bExists",V.Local.bExists)
+
+Program.Sub.Check_WO_Exists.End
+
+Program.Sub.Comments.Start
+${$0$}$$}$$}$12:00:00 AM$}$False
+Program.Sub.Comments.End
